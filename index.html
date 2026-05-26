@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>循環器内科 当直 希望収集</title>
+<title>循環器内科 当直・当番表</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
@@ -47,6 +47,7 @@ const INITIAL_STAFF = [
   { name:"黒川", quota:mkQuota() }, { name:"山口", quota:mkQuota() }, { name:"中山", quota:mkQuota() },
   { name:"忽滑谷", quota:mkQuota() }, { name:"西村", quota:mkQuota() }, { name:"松田", quota:mkQuota() },
   { name:"猪飼", quota:mkQuota() }, { name:"細田", quota:mkQuota() },
+  { name:"中岡", quota:mkQuota() },
   { name:"楠目", quota:mkQuota({ er_day_holiday:0, icu_day_holiday:0, icu_night:1 }) },
 ];
 
@@ -74,22 +75,33 @@ const prefsKey = (y,m)=>`prefs_${y}_${m}`;
 const tableKey = (y,m)=>`table_${y}_${m}`;
 const holidayKey = (y,m)=>`holidays_${y}_${m}`;
 const oncallKey = (y,m)=>`oncall_${y}_${m}`; // 呼出当番（管理者が手動で選ぶ）
+const lockKey = (y,m)=>`lock_${y}_${m}`; // 固定マス { `${slotId}_${day}`: true }
 const STAFF_KEY = "staff_list_v2"; // quota対応の新キー
+const ONCALL_LIST_KEY = "oncall_lists_v1"; // Oncallの選択肢リスト（①用・②③用を別々に管理）
 
-// 呼出当番の選択肢（担当医）。休日は前半・後半の2枠、平日は1枠。
-const ONCALL_DOCTORS = ["", "今井","細田","松田","西村","中山","保地/今井","保地/細田","保地/松田","保地/西村","黒川/今井","黒川/細田","黒川/松田","黒川/西村"];
+// 呼出当番の選択肢（担当医）の初期値。①用と②③用を別々に編集できる。
+const DEFAULT_ONCALL1 = ["今井","細田","松田","西村","中山","忽滑谷/今井","忽滑谷/細田","忽滑谷/松田","忽滑谷/西村","保地/今井","保地/細田","保地/松田","保地/西村","黒川/今井","黒川/細田","黒川/松田","黒川/西村"];
+const DEFAULT_ONCALL_LISTS = { oncall1: DEFAULT_ONCALL1 };
+
+// 連名（"保地/今井"）を個々の名前に分解。Oncall人数カウント・同日重複判定・実績カウントに使用。
+function splitDoctor(s){ return (s||"").split("/").map((x)=>x.trim()).filter(Boolean); }
+// 救命日勤の枠定義（自動割り当て対象外・手動・土日祝のみ）
+const RESCUE_SLOT = { id:"rescue_day", label:"救命日勤", kind:"day", holidayOnly:true };
 
 async function loadData(key){ const { data, error } = await sb.from("duty_data").select("content").eq("id",key).maybeSingle(); if(error){console.error(error);return null;} return data?data.content:null; }
 async function saveData(key, content){ const { error } = await sb.from("duty_data").upsert({ id:key, content, updated_at:new Date().toISOString() }); if(error){console.error(error);throw error;} }
 
 function App() {
   const now = new Date();
-  const [year, setYear] = useState(now.getFullYear());
-  const [month, setMonth] = useState(now.getMonth()+1);
+  const initMonth = new Date(now.getFullYear(), now.getMonth()+2, 1); // 2ヶ月後
+  const [year, setYear] = useState(initMonth.getFullYear());
+  const [month, setMonth] = useState(initMonth.getMonth()+1);
   const [role, setRole] = useState(null);
+  const [adminUser, setAdminUser] = useState(null);
   const [allPrefs, setAllPrefs] = useState({});
   const [holidays, setHolidays] = useState([]);
   const [staff, setStaff] = useState(INITIAL_STAFF);
+  const [oncallLists, setOncallLists] = useState(DEFAULT_ONCALL_LISTS);
   const [loaded, setLoaded] = useState(false);
   const [conn, setConn] = useState("checking");
 
@@ -99,9 +111,10 @@ function App() {
   const reload = useCallback(async ()=>{
     setLoaded(false);
     try {
-      const [p, h, s] = await Promise.all([ loadData(prefsKey(year,month)), loadData(holidayKey(year,month)), loadData(STAFF_KEY) ]);
+      const [p, h, s, ol] = await Promise.all([ loadData(prefsKey(year,month)), loadData(holidayKey(year,month)), loadData(STAFF_KEY), loadData(ONCALL_LIST_KEY) ]);
       setAllPrefs(p||{}); setHolidays(h||[]);
       if (s && Array.isArray(s) && s.length) setStaff(s);
+      if (ol && ol.oncall1) setOncallLists({ oncall1: ol.oncall1 });
       setConn("ok");
     } catch { setConn("error"); }
     setLoaded(true);
@@ -111,42 +124,91 @@ function App() {
   const saveAll = useCallback(async (next)=>{ setAllPrefs(next); await saveData(prefsKey(year,month), next); }, [year, month]);
   const saveHolidays = useCallback(async (hs)=>{ setHolidays(hs); await saveData(holidayKey(year,month), hs); }, [year, month]);
   const saveStaff = useCallback(async (list)=>{ setStaff(list); await saveData(STAFF_KEY, list); }, []);
+  const saveOncallLists = useCallback(async (lists)=>{ setOncallLists(lists); await saveData(ONCALL_LIST_KEY, lists); }, []);
 
   const F = { minHeight:"100vh", padding:20 };
   if (!loaded) return <div style={F}>読み込み中…</div>;
 
   if (role === null) {
     return (
-      <div style={{ ...F, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:18, paddingTop:50 }}>
-        <div style={{ fontSize:24, fontWeight:800 }}>循環器内科 当直 希望収集</div>
-        <MonthPicker year={year} month={month} setYear={setYear} setMonth={setMonth} />
-        <ConnBadge conn={conn} />
-        <div style={{ display:"flex", gap:14, flexWrap:"wrap", justifyContent:"center", marginTop:4 }}>
-          <button onClick={()=>setRole("staff")} style={bigBtn("#0f766e")}>希望を入力する<br/><small style={{fontWeight:400,opacity:.85}}>スタッフ向け</small></button>
-          <button onClick={()=>setRole("view")} style={bigBtn("#1d4ed8")}>当直表を見る<br/><small style={{fontWeight:400,opacity:.85}}>スタッフ向け</small></button>
-          <button onClick={()=>setRole("admin")} style={bigBtn("#b91c1c")}>集約して表を作る<br/><small style={{fontWeight:400,opacity:.85}}>管理者向け</small></button>
+      <div style={{ position:"relative", minHeight:"100vh", display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", padding:20, overflow:"hidden",
+        background:"radial-gradient(1200px 600px at 15% 10%, #155e75 0%, transparent 55%), radial-gradient(1000px 700px at 90% 90%, #1e3a8a 0%, transparent 55%), linear-gradient(135deg, #0b3b3a 0%, #0e7490 45%, #1d4ed8 100%)" }}>
+        {/* 背景の装飾ブロブ */}
+        <div style={{ position:"absolute", top:"-120px", left:"-80px", width:360, height:360, borderRadius:"50%", background:"rgba(45,212,191,0.25)", filter:"blur(90px)" }} />
+        <div style={{ position:"absolute", bottom:"-140px", right:"-60px", width:420, height:420, borderRadius:"50%", background:"rgba(96,165,250,0.22)", filter:"blur(100px)" }} />
+
+        <div style={{ position:"relative", background:"rgba(255,255,255,0.92)", backdropFilter:"blur(14px)", WebkitBackdropFilter:"blur(14px)", borderRadius:28, padding:"44px 38px 38px", boxShadow:"0 30px 80px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.6)", border:"1px solid rgba(255,255,255,0.5)", maxWidth:520, width:"100%", textAlign:"center" }}>
+          <div style={{ display:"inline-flex", alignItems:"center", gap:8, padding:"6px 14px", borderRadius:999, background:"rgba(15,118,110,0.1)", marginBottom:18 }}>
+            <span style={{ width:7, height:7, borderRadius:"50%", background:"#0f766e", display:"inline-block" }} />
+            <span style={{ fontSize:11.5, fontWeight:800, color:"#0f766e", letterSpacing:"0.22em" }}>CARDIOLOGY · DUTY ROSTER</span>
+          </div>
+          <div style={{ fontSize:32, fontWeight:900, color:"#0f172a", lineHeight:1.25, letterSpacing:"0.01em" }}>循環器内科</div>
+          <div style={{ fontSize:23, fontWeight:800, color:"#0f766e", lineHeight:1.25, marginTop:2 }}>当直・当番表</div>
+          <div style={{ width:54, height:4, background:"linear-gradient(90deg,#0f766e,#1d4ed8)", borderRadius:2, margin:"18px auto 22px" }} />
+
+          {/* 年月選択：中央揃え＋枠で囲んだコントロール */}
+          <div style={{ display:"flex", justifyContent:"center", marginBottom:14 }}>
+            <MonthPicker year={year} month={month} setYear={setYear} setMonth={setMonth} />
+          </div>
+          <ConnBadge conn={conn} />
+
+          <div style={{ display:"flex", flexDirection:"column", gap:12, marginTop:24 }}>
+            <TopButton bg="#0f766e" icon="✍️" title="希望を入力する" sub="スタッフ向け" onClick={()=>setRole("staff")} />
+            <TopButton bg="#1d4ed8" icon="📅" title="当直・当番表を見る" sub="スタッフ向け" onClick={()=>setRole("view")} />
+            <TopButton bg="#b91c1c" icon="🗂️" title="集約して表を作る" sub="管理者向け" onClick={()=>setRole("adminGate")} />
+          </div>
+          <div style={{ fontSize:12, color:"#94a3b8", marginTop:20 }}>{year}年{month}月 ｜ 提出済み <b style={{ color:"#0f766e" }}>{Object.keys(allPrefs).length}</b> / {staff.length} 名</div>
         </div>
-        <div style={{ fontSize:12, color:"#9ca3af", marginTop:4 }}>{year}年{month}月 ｜ 提出済み: {Object.keys(allPrefs).length} / {staff.length} 名</div>
+      </div>
+    );
+  }
+  // 管理者：入室者を選ぶゲート画面
+  if (role === "adminGate") {
+    return (
+      <div style={{ minHeight:"100vh", display:"flex", alignItems:"center", justifyContent:"center", padding:20, background:"linear-gradient(135deg,#7f1d1d,#b91c1c)" }}>
+        <div style={{ background:"#fff", borderRadius:20, padding:"34px 30px", boxShadow:"0 20px 60px rgba(0,0,0,0.25)", maxWidth:520, width:"100%" }}>
+          <div style={{ fontSize:20, fontWeight:800, marginBottom:6, textAlign:"center" }}>管理者として入室</div>
+          <div style={{ fontSize:13, color:"#6b7280", marginBottom:18, textAlign:"center" }}>編集する担当者を選んでください（記録用）</div>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:8, justifyContent:"center" }}>
+            {staff.map((s)=><button key={s.name} onClick={()=>{ setAdminUser(s.name); setRole("admin"); }} style={{ padding:"10px 18px", borderRadius:10, border:"1px solid #d1d5db", background:"#fff", fontWeight:700, fontSize:14, cursor:"pointer" }}>{s.name}</button>)}
+          </div>
+          <div style={{ textAlign:"center", marginTop:20 }}><button onClick={()=>setRole(null)} style={{ background:"none", border:"none", color:"#0f766e", fontWeight:700, fontSize:13, cursor:"pointer" }}>← 戻る</button></div>
+        </div>
       </div>
     );
   }
   const common = { year, month, DAYS, staff, back:()=>setRole(null) };
   if (role==="staff") return <StaffView {...common} allPrefs={allPrefs} saveAll={saveAll} />;
   if (role==="view") return <ViewerView {...common} />;
-  return <AdminView {...common} allPrefs={allPrefs} reload={reload} holidays={holidays} saveHolidays={saveHolidays} saveStaff={saveStaff} />;
+  return <AdminView {...common} adminUser={adminUser} allPrefs={allPrefs} reload={reload} holidays={holidays} saveHolidays={saveHolidays} saveStaff={saveStaff} oncallLists={oncallLists} saveOncallLists={saveOncallLists} />;
 }
 
 function MonthPicker({ year, month, setYear, setMonth }) {
   const prev=()=>{ if(month===1){setYear(year-1);setMonth(12);} else setMonth(month-1); };
   const next=()=>{ if(month===12){setYear(year+1);setMonth(1);} else setMonth(month+1); };
-  return (<div style={{ display:"flex", alignItems:"center", gap:12 }}>
-    <button onClick={prev} style={{ fontSize:18, padding:"4px 12px", borderRadius:8, border:"1px solid #d1d5db", background:"#fff", cursor:"pointer" }}>‹</button>
-    <div style={{ fontSize:18, fontWeight:800, minWidth:140, textAlign:"center" }}>{year}年 {month}月</div>
-    <button onClick={next} style={{ fontSize:18, padding:"4px 12px", borderRadius:8, border:"1px solid #d1d5db", background:"#fff", cursor:"pointer" }}>›</button>
+  const arrow={ width:34, height:34, display:"flex", alignItems:"center", justifyContent:"center", fontSize:18, borderRadius:10, border:"1px solid #d1d5db", background:"#fff", color:"#0f766e", cursor:"pointer", fontWeight:800, lineHeight:1 };
+  return (<div style={{ display:"inline-flex", alignItems:"center", gap:10, padding:"8px 12px", borderRadius:14, background:"#f8fafc", border:"1px solid #e2e8f0", boxShadow:"inset 0 1px 2px rgba(0,0,0,0.04)" }}>
+    <button onClick={prev} style={arrow} title="前の月">‹</button>
+    <div style={{ minWidth:128, textAlign:"center" }}>
+      <span style={{ fontSize:13, fontWeight:700, color:"#64748b" }}>{year}年</span>
+      <div style={{ fontSize:24, fontWeight:900, color:"#0f172a", lineHeight:1.1 }}>{month}<span style={{ fontSize:14, fontWeight:700, marginLeft:2 }}>月</span></div>
+    </div>
+    <button onClick={next} style={arrow} title="次の月">›</button>
   </div>);
 }
 function ConnBadge({ conn }) { const map={ checking:["#9ca3af","接続を確認中…"], ok:["#15803d","● データベース接続OK"], error:["#dc2626","× 接続エラー（鍵を確認）"] }; const [c,t]=map[conn]; return <div style={{ fontSize:12, color:c, fontWeight:700 }}>{t}</div>; }
 function bigBtn(bg){ return { padding:"18px 26px", borderRadius:14, border:"none", background:bg, color:"#fff", fontWeight:800, fontSize:16, cursor:"pointer", minWidth:170, textAlign:"center" }; }
+function TopButton({ bg, icon, title, sub, onClick }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <button onClick={onClick} onMouseEnter={()=>setHover(true)} onMouseLeave={()=>setHover(false)}
+      style={{ display:"flex", alignItems:"center", gap:14, width:"100%", padding:"15px 18px", borderRadius:16, border:"none", background:bg, color:"#fff", cursor:"pointer", textAlign:"left", boxShadow: hover?"0 12px 26px rgba(0,0,0,0.28)":"0 3px 10px rgba(0,0,0,0.14)", transform: hover?"translateY(-3px)":"none", transition:"all .18s ease" }}>
+      <span style={{ flex:"0 0 auto", width:44, height:44, borderRadius:12, background:"rgba(255,255,255,0.18)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:22 }}>{icon}</span>
+      <span style={{ flex:1 }}><span style={{ display:"block", fontSize:17, fontWeight:800 }}>{title}</span><span style={{ display:"block", fontSize:12, opacity:.85, marginTop:1 }}>{sub}</span></span>
+      <span style={{ fontSize:20, fontWeight:800, opacity:.8, transform: hover?"translateX(3px)":"none", transition:"transform .18s ease" }}>›</span>
+    </button>
+  );
+}
 
 function StaffView({ year, month, DAYS, staff, allPrefs, saveAll, back }) {
   const [me, setMe] = useState(null);
@@ -178,13 +240,15 @@ function StaffView({ year, month, DAYS, staff, allPrefs, saveAll, back }) {
     <div style={S.page} onMouseUp={()=>setDragging(false)} onMouseLeave={()=>setDragging(false)}>
       <button style={S.link} onClick={()=>setMe(null)}>← 名前選択へ</button>
       <h1 style={S.h1}>{me} さんの希望（{year}年{month}月）</h1>
-      <p style={S.sub}>入れない日を塗ってください。平日=青で当直不可。休日は緑=夜勤NG/ピンク=日勤NG/青=両方NG。</p>
+      <p style={S.sub}>入れない日を塗ってください。青＝終日NG。休日は緑＝夜勤NG/ピンク＝日勤NG。</p>
       <div style={{ ...S.card, padding:"10px 14px", marginBottom:10 }}><div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
         <span style={{ fontSize:13, fontWeight:700 }}>塗る色：</span>
-        {[["blue","青（当直/両方NG）"],["green","緑（夜勤NG・日勤OK・休日のみ）"],["pink","ピンク（日勤NG・夜勤OK・休日のみ）"],["none","消す"]].map(([k,lbl])=>
+        {[["blue","青（終日NG）"],["green","緑（夜勤NG・日勤OK）"],["pink","ピンク（日勤NG・夜勤OK）"],["none","消す"]].map(([k,lbl])=>
           <span key={k} onClick={()=>setPaint(k)} style={{ display:"inline-flex", alignItems:"center", gap:5, padding:"6px 12px", borderRadius:8, border: paint===k?"2px solid #111827":"1px solid #d1d5db", background:"#fff", cursor:"pointer", fontSize:12, fontWeight:700 }}>{k!=="none"&&<i style={{width:14,height:14,background:PALETTE[k].bg,borderRadius:3,display:"inline-block"}}/>}{lbl}</span>)}
         <span style={{ fontSize:12, color:"#dc2626", fontWeight:700 }}>{hint}</span>
-      </div></div>
+      </div>
+      <div style={{ fontSize:12, color:"#92400e", marginTop:8, fontWeight:600 }}>⚠ 緑・ピンクは休日・祝日のみ入力できます。</div>
+      </div>
       <div style={S.card}><div style={{ display:"grid", gridTemplateColumns:"repeat(7, 1fr)", gap:4, maxWidth:520 }}>
         {WEEK_JP.map((w,i)=><div key={w} style={{ textAlign:"center", fontSize:12, fontWeight:700, color:i===0?"#dc2626":i===6?"#2563eb":"#6b7280", padding:"4px 0" }}>{w}</div>)}
         {Array.from({ length: DAYS[0].w }).map((_,i)=><div key={"p"+i}/>)}
@@ -214,19 +278,32 @@ function ViewerView({ year, month, DAYS, back }) {
   const dayTh=(day)=>({ ...S.th, color: day.isSun?"#dc2626":day.isSat?"#2563eb":day.isWeekend?"#dc2626":"#374151", background: day.isWeekend?"#f0f9ff":"#fff" });
   return (
     <div style={S.page}><button style={S.link} onClick={back}>← 戻る</button>
-      <h1 style={S.h1}>当直表（{year}年{month}月）</h1>
+      <h1 style={S.h1}>当直・当番表（{year}年{month}月）</h1>
       {!loaded ? <p style={S.sub}>読み込み中…</p> : !table ? <p style={S.sub}>まだ当直表は公開されていません。</p> : (
         <div style={S.card}><table style={{ borderCollapse:"collapse" }}>
           <thead><tr><th style={{ ...S.th, position:"sticky", left:0, zIndex:2, textAlign:"left" }}>枠</th>{DAYS.map((day)=><th key={day.d} style={dayTh(day)}>{day.d}<br/><span style={{fontWeight:400}}>{day.wLabel}</span></th>)}</tr></thead>
           <tbody>{SLOTS.map((slot)=>(<tr key={slot.id}><td style={{ ...S.name, background: slot.kind==="night"?"#eef2ff":"#fff" }}>{slot.label}</td>
             {DAYS.map((day)=>{ const n=table[`${slot.id}_${day.d}`]; const disabled=slot.holidayOnly&&!day.isWeekend;
               return <td key={day.d} style={{ ...S.cell, width:46, fontSize:11, background: disabled?"#f1f5f9":day.isWeekend?"#f0f9ff":"#fff" }}>{n||""}</td>; })}</tr>))}
-            <tr><td style={{ ...S.name, background:"#fef9c3" }}>呼出当番(前半)</td>
-              {DAYS.map((day)=>{ const v=oncall[`first_${day.d}`]||"";
+            <tr key="rescue_day"><td style={{ ...S.name, background:"#ecfeff" }}>救命日勤</td>
+              {DAYS.map((day)=>{ const v=oncall[`rescue_day_${day.d}`]||""; const disabled=!day.isWeekend;
+                return <td key={day.d} style={{ ...S.cell, width:46, fontSize:10, background: disabled?"#f1f5f9":"#ecfeff" }}>{v}</td>; })}</tr>
+            <tr key="oncall1a"><td style={{ ...S.name, background:"#fef9c3" }}>Oncall①<span style={{ fontSize:10, color:"#92400e" }}> 前半</span></td>
+              {DAYS.map((day)=>{ const v=oncall[day.isWeekend?`oncall1a_${day.d}`:`oncall1_${day.d}`]||"";
                 return <td key={day.d} style={{ ...S.cell, width:46, fontSize:9, background:"#fffbeb" }}>{v}</td>; })}</tr>
-            <tr><td style={{ ...S.name, background:"#fef9c3" }}>呼出当番(後半)</td>
-              {DAYS.map((day)=>{ const disabled=!day.isWeekend; const v=oncall[`second_${day.d}`]||"";
-                return <td key={day.d} style={{ ...S.cell, width:46, fontSize:9, background: disabled?"#f1f5f9":"#fffbeb" }}>{disabled?"":v}</td>; })}</tr>
+            <tr key="oncall1b"><td style={{ ...S.name, background:"#fef9c3" }}>Oncall①<span style={{ fontSize:10, color:"#92400e" }}> 後半</span></td>
+              {DAYS.map((day)=>{ const disabled=!day.isWeekend; const v=oncall[`oncall1b_${day.d}`]||"";
+                return <td key={day.d} style={{ ...S.cell, width:46, fontSize:9, background: disabled?"#f1f5f9":"#fffbeb" }}>{v}</td>; })}</tr>
+            {[["oncall2","Oncall②"],["oncall3","Oncall③"]].map(([fld,lbl])=>(
+              <tr key={fld}><td style={{ ...S.name, background:"#fef9c3" }}>{lbl}</td>
+                {DAYS.map((day)=>{ const v=oncall[`${fld}_${day.d}`]||"";
+                  return <td key={day.d} style={{ ...S.cell, width:46, fontSize:9, background:"#fffbeb" }}>{v}</td>; })}</tr>
+            ))}
+            <tr key="oncall_count"><td style={{ ...S.name, background:"#fde68a", fontSize:11 }}>Oncall人数</td>
+              {DAYS.map((day)=>{ let c=0;
+                SLOTS.forEach((sl)=>{ if(table[`${sl.id}_${day.d}`])c++; });
+                ["oncall1a","oncall1b","oncall1","oncall2","oncall3"].forEach((f)=>{ c+=(oncall[`${f}_${day.d}`]||"").split("/").map((x)=>x.trim()).filter(Boolean).length; });
+                return <td key={day.d} style={{ ...S.cell, width:46, fontSize:11, fontWeight:800, background:"#fffbeb", color: c>0?"#92400e":"#d1d5db" }}>{c||""}</td>; })}</tr>
             </tbody>
         </table></div>
       )}
@@ -234,8 +311,9 @@ function ViewerView({ year, month, DAYS, back }) {
   );
 }
 
-function AdminView({ year, month, DAYS, staff, allPrefs, back, reload, holidays, saveHolidays, saveStaff }) {
+function AdminView({ year, month, DAYS, staff, adminUser, allPrefs, back, reload, holidays, saveHolidays, saveStaff, oncallLists, saveOncallLists }) {
   const [assign, setAssign] = useState({});
+  const [locks, setLocks] = useState({}); // 固定マス { `${slotId}_${day}`: true }
   const [warnings, setWarnings] = useState([]);
   const [view, setView] = useState("summary");
   const [editCell, setEditCell] = useState(null);
@@ -244,9 +322,11 @@ function AdminView({ year, month, DAYS, staff, allPrefs, back, reload, holidays,
   const [newName, setNewName] = useState("");
   const [memberStatus, setMemberStatus] = useState("");
   const [bulkQuota, setBulkQuota] = useState(DEFAULT_QUOTA);
-  const [oncall, setOncall] = useState({}); // { `first_${day}`: "今井", `second_${day}`: "細田" }
+  const [newOncall1, setNewOncall1] = useState("");
+  const [oncall, setOncall] = useState({}); // { `oncall1_${day}`: "今井", `oncall2_${day}`: "細田", `oncall3_${day}`: "松田", `rescue_day_${day}`: "藤光" }
   useEffect(()=>{ (async()=>{ const t=await loadData(tableKey(year,month)); setAssign(t||{}); })(); }, [year, month]);
   useEffect(()=>{ (async()=>{ const o=await loadData(oncallKey(year,month)); setOncall(o||{}); })(); }, [year, month]);
+  useEffect(()=>{ (async()=>{ const l=await loadData(lockKey(year,month)); setLocks(l||{}); })(); }, [year, month]);
   useEffect(()=>{ setHolInput(holidays.join(",")); }, [holidays]);
 
   const colorOf=(name,d)=>allPrefs[name]?.[d]||"none";
@@ -259,15 +339,21 @@ function AdminView({ year, month, DAYS, staff, allPrefs, back, reload, holidays,
     const next={}; const cnt={}; const kc=(n,s)=>`${n}__${s}`;
     staff.forEach((st)=>SLOTS.forEach((s)=>cnt[kc(st.name,s.id)]=0));
     const last=Object.fromEntries(staff.map((st)=>[st.name,-10]));
+    // 固定マスは現在の割り当てを保持し、カウント類にも反映する
+    for (const day of DAYS){ for (const slot of SLOTS){ const key=`${slot.id}_${day.d}`;
+      if(locks[key] && assign[key]){ const c=assign[key]; next[key]=c; if(cnt[kc(c,slot.id)]!==undefined)cnt[kc(c,slot.id)]++; if(last[c]!==undefined)last[c]=day.d; } } }
     for (const day of DAYS){ const used=new Set();
+      // この日の固定マスで既に埋まっている人をusedに入れる（同日重複を避ける）
+      for (const slot of SLOTS){ const key=`${slot.id}_${day.d}`; if(locks[key]&&next[key])used.add(next[key]); }
       for (const slot of SLOTS){ if(slot.holidayOnly&&!day.isWeekend)continue; const key=`${slot.id}_${day.d}`;
+        if(locks[key]&&assign[key])continue; // 固定マスはスキップ（上で確定済み）
         const cands=staff.map((st)=>{ const n=st.name; if(!canWork(n,slot,day))return null; if(used.has(n))return null; if(next[`icu_night_${day.d-1}`]===n)return null;
           let sc=0; const done=cnt[kc(n,slot.id)]; const tgt=quotaOf(n,slot.id); sc+=done*25; if(done>=tgt)sc+=400;
           const gap=day.d-last[n]; if(gap<=1)sc+=1000; else if(gap===2)sc+=25; sc+=Math.random()*2; return {n,sc}; }).filter(Boolean).sort((a,b)=>a.sc-b.sc);
         if(cands.length){ const c=cands[0].n; next[key]=c; cnt[kc(c,slot.id)]++; used.add(c); last[c]=day.d; } else next[key]=null;
       } }
     setAssign(next); validate(next); setView("table");
-  }, [canWork, DAYS, staff]);
+  }, [canWork, DAYS, staff, locks, assign]);
 
   const validate=useCallback((a)=>{ const w=[];
     for (const day of DAYS) for (const slot of SLOTS){ if(slot.holidayOnly&&!day.isWeekend)continue; const n=a[`${slot.id}_${day.d}`];
@@ -275,8 +361,9 @@ function AdminView({ year, month, DAYS, staff, allPrefs, back, reload, holidays,
     setWarnings(w);
   }, [canWork, DAYS]);
 
-  const publish=async()=>{ setPubStatus("公開中…"); try{ await saveData(tableKey(year,month),assign); await saveData(oncallKey(year,month),oncall); setPubStatus("公開しました ✓"); }catch{ setPubStatus("公開に失敗"); } setTimeout(()=>setPubStatus(""),3000); };
+  const publish=async()=>{ setPubStatus("公開中…"); try{ await saveData(tableKey(year,month),assign); await saveData(oncallKey(year,month),oncall); await saveData(lockKey(year,month),locks); setPubStatus("公開しました ✓"); }catch{ setPubStatus("公開に失敗"); } setTimeout(()=>setPubStatus(""),3000); };
   const setOncallVal=async(field,day,val)=>{ const next={...oncall,[`${field}_${day}`]:val}; if(!val) delete next[`${field}_${day}`]; setOncall(next); try{ await saveData(oncallKey(year,month),next); }catch{} };
+  const toggleLock=async(key)=>{ const next={...locks}; if(next[key]) delete next[key]; else next[key]=true; setLocks(next); try{ await saveData(lockKey(year,month),next); }catch{} };
   const applyHolidays=async()=>{ const hs=holInput.split(",").map((s)=>parseInt(s.trim(),10)).filter((n)=>!isNaN(n)&&n>=1&&n<=31); await saveHolidays(hs); };
 
   // メンバー編集
@@ -286,28 +373,62 @@ function AdminView({ year, month, DAYS, staff, allPrefs, back, reload, holidays,
   const moveMember=async(idx,dir)=>{ const j=idx+dir; if(j<0||j>=staff.length)return; const arr=[...staff]; [arr[idx],arr[j]]=[arr[j],arr[idx]]; await saveStaff(arr); };
   const applyBulk=async()=>{ if(!confirm("全メンバーの担当回数を、入力した既定値で上書きします。よろしいですか？"))return; await saveStaff(staff.map((s)=>({...s,quota:{...bulkQuota}}))); setMemberStatus("一括設定しました ✓"); setTimeout(()=>setMemberStatus(""),2000); };
 
-  const tally=useMemo(()=>{ const t={}; staff.forEach((st)=>t[st.name]=Object.fromEntries(SLOTS.map((s)=>[s.id,0])));
-    Object.entries(assign).forEach(([k,n])=>{ if(!n)return; const sl=k.slice(0,k.lastIndexOf("_")); if(t[n]&&t[n][sl]!==undefined)t[n][sl]++; }); return t; }, [assign, staff]);
+  // Oncall選択肢リストの編集（listKey は "oncall1" または "oncall23"）
+  const addOncallItem=async(listKey,name)=>{ const nm=(name||"").trim(); if(!nm)return; const cur=oncallLists[listKey]||[]; if(cur.includes(nm))return; await saveOncallLists({...oncallLists,[listKey]:[...cur,nm]}); };
+  const removeOncallItem=async(listKey,name)=>{ const cur=oncallLists[listKey]||[]; await saveOncallLists({...oncallLists,[listKey]:cur.filter((x)=>x!==name)}); };
+  const moveOncallItem=async(listKey,idx,dir)=>{ const cur=[...(oncallLists[listKey]||[])]; const j=idx+dir; if(j<0||j>=cur.length)return; [cur[idx],cur[j]]=[cur[j],cur[idx]]; await saveOncallLists({...oncallLists,[listKey]:cur}); };
+
+  const tally=useMemo(()=>{ const t={}; staff.forEach((st)=>{ t[st.name]=Object.fromEntries(SLOTS.map((s)=>[s.id,0])); t[st.name].oncall=0; t[st.name][RESCUE_SLOT.id]=0; });
+    // 通常枠（当直表）の実績
+    Object.entries(assign).forEach(([k,n])=>{ if(!n)return; const sl=k.slice(0,k.lastIndexOf("_")); if(t[n]&&t[n][sl]!==undefined)t[n][sl]++; });
+    // Oncall①②③・救命日勤の実績（oncall stateから集計）
+    Object.entries(oncall).forEach(([k,v])=>{ if(!v)return;
+      if(k.startsWith("rescue_day_")){ if(t[v]&&t[v][RESCUE_SLOT.id]!==undefined)t[v][RESCUE_SLOT.id]++; return; }
+      // Oncall①②③：連名は中の各名前に1回ずつ延べカウント
+      splitDoctor(v).forEach((nm)=>{ if(t[nm])t[nm].oncall++; });
+    });
+    return t; }, [assign, oncall, staff]);
+
+  // その日に勤務（ER日勤・ICU日勤・ICU当直・救命日勤）で出ているメンバーの集合。
+  const workersOnDay=useCallback((day)=>{ const set=new Set();
+    SLOTS.forEach((sl)=>{ const n=assign[`${sl.id}_${day}`]; if(n)set.add(n); });
+    const r=oncall[`rescue_day_${day}`]; if(r)set.add(r);
+    return set;
+  }, [assign, oncall]);
+  // Oncall②③用：候補はメンバー全員。ただし(1)その日の勤務者(ER/ICU日勤・ICU当直・救命日勤)と
+  // (2)その日の当直不可メンバー(夜勤NG)を除外。現在選択中の値は残す。
+  const oncall23Options=useCallback((day, field)=>{ const workers=workersOnDay(day); const cur=oncall[`${field}_${day}`]||"";
+    const dayInfo=DAYS.find((x)=>x.d===day);
+    return staff.map((s)=>s.name).filter((nm)=>{ if(nm===cur)return true; if(workers.has(nm))return false;
+      const a=availFromColor(colorOf(nm,day), dayInfo?dayInfo.isWeekend:false); return a.night; });
+  }, [workersOnDay, oncall, staff, DAYS, allPrefs]);
+  // その日のOncall人数：救命日勤以外の勤務（ER日勤・ICU日勤・ICU当直）＋Oncall①前半/後半・②・③の延べ人数。
+  const oncallCountOnDay=useCallback((day)=>{ let c=0;
+    SLOTS.forEach((sl)=>{ if(assign[`${sl.id}_${day}`])c++; });
+    ["oncall1a","oncall1b","oncall1","oncall2","oncall3"].forEach((f)=>{ c+=splitDoctor(oncall[`${f}_${day}`]||"").length; });
+    return c;
+  }, [assign, oncall]);
 
   const S=styles();
   const submitted=staff.filter((s)=>allPrefs[s.name]);
   const dayTh=(day)=>({ ...S.th, color: day.isSun?"#dc2626":day.isSat?"#2563eb":day.isWeekend?"#dc2626":"#374151", background: day.isWeekend?"#f0f9ff":"#fff" });
   return (
     <div style={S.page}><button style={S.link} onClick={back}>← 戻る</button>
-      <h1 style={S.h1}>管理者：集約と割り当て（{year}年{month}月）</h1>
+      <h1 style={S.h1}>管理者：集約と割り当て（{year}年{month}月）{adminUser?<span style={{ fontSize:13, fontWeight:600, color:"#b91c1c", marginLeft:8 }}>入室者: {adminUser}</span>:null}</h1>
       <p style={S.sub}>提出 {submitted.length}/{staff.length} 名　｜　未提出: {staff.filter((s)=>!allPrefs[s.name]).map((s)=>s.name).join("、")||"なし"}</p>
       <div style={S.bar}>
         <button style={S.tab(view==="summary")} onClick={()=>setView("summary")}>希望サマリ</button>
-        <button style={S.tab(view==="table")} onClick={()=>setView("table")}>当直表</button>
         <button style={S.tab(view==="members")} onClick={()=>setView("members")}>メンバー・担当回数</button>
+        <button style={S.tab(view==="oncalledit")} onClick={()=>setView("oncalledit")}>Oncall編集</button>
+        <button style={S.tab(view==="table")} onClick={()=>setView("table")}>当直表</button>
         <span style={{ width:1, height:24, background:"#e5e7eb", margin:"0 4px" }} />
-        <button style={S.primary} onClick={autoAssign}>⚡ 自動割り当て</button>
         <button style={S.ghost} onClick={reload}>最新の希望を再読込</button>
+        <button style={S.primary} onClick={()=>{ if(window.confirm("自動割り当てを実行します。\n現在の当直表は新しく上書きされます（手動で直した内容も消えます）。\nよろしいですか？")) autoAssign(); }}>⚡ 自動割り当て</button>
         <button style={{ ...S.primary, background:"#1d4ed8" }} onClick={publish}>📢 この表を公開</button>
         <span style={{ fontSize:13, color:"#1d4ed8", fontWeight:700 }}>{pubStatus}</span>
       </div>
 
-      {view!=="members" && (
+      {view!=="members" && view!=="oncalledit" && (
         <div style={{ ...S.card, padding:"10px 14px", marginBottom:12 }}>
           <span style={{ fontSize:13, fontWeight:700, marginRight:8 }}>この月の祝日（日にちをカンマ区切り）：</span>
           <input value={holInput} onChange={(e)=>setHolInput(e.target.value)} placeholder="例: 20" style={{ width:160, padding:"4px 8px" }} />
@@ -350,6 +471,37 @@ function AdminView({ year, month, DAYS, staff, allPrefs, back, reload, holidays,
         </div>
       )}
 
+      {view==="oncalledit" && (
+        <div style={S.card}>
+          <div style={{ fontSize:13, color:"#6b7280", marginBottom:14 }}>Oncall①で使う担当医リストを編集できます。連名は「保地/今井」のようにスラッシュで入力してください。変更は即保存されます。<br/><span style={{ color:"#92400e" }}>※ Oncall②③はメンバー全員から自動表示されます（その日の勤務者・当直不可者を除く）。編集は不要です。</span></div>
+          <div style={{ display:"flex", gap:24, flexWrap:"wrap", alignItems:"flex-start" }}>
+            {[["oncall1","Oncall① 用リスト",newOncall1,setNewOncall1]].map(([lk,title,nv,setNv])=>(
+              <div key={lk} style={{ minWidth:280, flex:"1 1 280px", maxWidth:420, border:"1px solid #e5e7eb", borderRadius:10, padding:14 }}>
+                <div style={{ fontSize:14, fontWeight:800, marginBottom:10, color:"#0f766e" }}>{title}</div>
+                <div style={{ display:"flex", gap:6, marginBottom:12 }}>
+                  <input value={nv} onChange={(e)=>setNv(e.target.value)} placeholder="名前（連名は 保地/今井）" style={{ flex:1, padding:"6px 10px", borderRadius:8, border:"1px solid #d1d5db", fontSize:13 }} onKeyDown={(e)=>{ if(e.key==="Enter"){ addOncallItem(lk,nv); setNv(""); } }} />
+                  <button style={S.primary} onClick={()=>{ addOncallItem(lk,nv); setNv(""); }}>＋</button>
+                </div>
+                <table style={{ borderCollapse:"collapse", fontSize:13, width:"100%" }}>
+                  <tbody>{(oncallLists[lk]||[]).map((nm,idx)=>(
+                    <tr key={nm}>
+                      <td style={{ padding:"3px 4px", whiteSpace:"nowrap" }}>
+                        <button onClick={()=>moveOncallItem(lk,idx,-1)} style={S.miniBtn} title="上へ">↑</button>
+                        <button onClick={()=>moveOncallItem(lk,idx,1)} style={S.miniBtn} title="下へ">↓</button>
+                      </td>
+                      <td style={{ padding:"3px 8px", fontWeight:600 }}>{nm}</td>
+                      <td style={{ padding:"3px 4px", textAlign:"right" }}><button onClick={()=>removeOncallItem(lk,nm)} style={{ ...S.miniBtn, color:"#dc2626", borderColor:"#fca5a5" }}>削除</button></td>
+                    </tr>
+                  ))}
+                  {(oncallLists[lk]||[]).length===0 && <tr><td colSpan={3} style={{ padding:"8px 4px", color:"#9ca3af", fontSize:12 }}>（リストが空です）</td></tr>}
+                  </tbody>
+                </table>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {view==="summary" && (
         <div style={S.card}><table style={{ borderCollapse:"collapse" }}>
           <thead><tr><th style={{ ...S.th, position:"sticky", left:0, zIndex:2, textAlign:"left" }}>氏名</th>{DAYS.map((day)=><th key={day.d} style={dayTh(day)}>{day.d}<br/><span style={{fontWeight:400}}>{day.wLabel}</span></th>)}</tr></thead>
@@ -363,26 +515,55 @@ function AdminView({ year, month, DAYS, staff, allPrefs, back, reload, holidays,
         <div style={S.card}><table style={{ borderCollapse:"collapse" }}>
           <thead><tr><th style={{ ...S.th, position:"sticky", left:0, zIndex:2, textAlign:"left" }}>枠</th>{DAYS.map((day)=><th key={day.d} style={dayTh(day)}>{day.d}<br/><span style={{fontWeight:400}}>{day.wLabel}</span></th>)}</tr></thead>
           <tbody>{SLOTS.map((slot)=>(<tr key={slot.id}><td style={{ ...S.name, background: slot.kind==="night"?"#eef2ff":"#fff" }}>{slot.label}</td>
-            {DAYS.map((day)=>{ const key=`${slot.id}_${day.d}`, n=assign[key]; const bad=n&&!canWork(n,slot,day); const disabled=slot.holidayOnly&&!day.isWeekend; const editing=editCell===key;
-              return <td key={day.d} style={{ ...S.cell, width:46, fontSize:11, background: disabled?"#f1f5f9":bad?"#fee2e2":day.isWeekend?"#f0f9ff":"#fff", color: bad?"#b91c1c":"#111827", position:"relative" }} onClick={()=>!disabled&&setEditCell(editing?null:key)}>{n}
-                {editing&&<select autoFocus value={n||""} onClick={(e)=>e.stopPropagation()} onChange={(e)=>{ const v=e.target.value||null; setAssign((a)=>{ const na={...a,[key]:v}; validate(na); return na; }); setEditCell(null); }} style={{ position:"absolute", top:0, left:0, width:92, zIndex:5, fontSize:12 }}>
-                  <option value="">（空き）</option>{staff.filter((x)=>canSlot(x.name,slot)).map((x)=>{ const a=availFromColor(colorOf(x.name,day.d),day.isWeekend); const ok=slot.kind==="night"?a.night:a.day; return <option key={x.name} value={x.name}>{x.name}{ok?"":" ⚠"}</option>; })}
-                </select>}</td>; })}</tr>))}
-            <tr><td style={{ ...S.name, background:"#fef9c3" }}>呼出当番(前半)</td>
-              {DAYS.map((day)=>{ const val=oncall[`first_${day.d}`]||"";
+            {DAYS.map((day)=>{ const key=`${slot.id}_${day.d}`, n=assign[key]; const bad=n&&!canWork(n,slot,day); const disabled=slot.holidayOnly&&!day.isWeekend; const editing=editCell===key; const locked=!!locks[key];
+              return <td key={day.d} style={{ ...S.cell, width:46, fontSize:11, background: disabled?"#f1f5f9":bad?"#fee2e2":locked?"#fff7ed":day.isWeekend?"#f0f9ff":"#fff", color: bad?"#b91c1c":"#111827", position:"relative", boxShadow: locked?"inset 0 0 0 2px #ea580c":"none" }} onClick={()=>!disabled&&setEditCell(editing?null:key)}>
+                {locked&&<span style={{ position:"absolute", top:0, left:1, fontSize:8, lineHeight:1 }}>📌</span>}{n}
+                {editing&&<div onClick={(e)=>e.stopPropagation()} style={{ position:"absolute", top:0, left:0, zIndex:6, background:"#fff", border:"1px solid #d1d5db", borderRadius:6, boxShadow:"0 4px 14px rgba(0,0,0,.18)", padding:4, width:120 }}>
+                  <select autoFocus value={n||""} onChange={(e)=>{ const v=e.target.value||null; setAssign((a)=>{ const na={...a,[key]:v}; validate(na); return na; }); }} style={{ width:"100%", fontSize:12, marginBottom:4 }}>
+                    <option value="">（空き）</option>{staff.filter((x)=>canSlot(x.name,slot)).map((x)=>{ const a=availFromColor(colorOf(x.name,day.d),day.isWeekend); const ok=slot.kind==="night"?a.night:a.day; return <option key={x.name} value={x.name}>{x.name}{ok?"":" ⚠"}</option>; })}
+                  </select>
+                  <div style={{ display:"flex", gap:4 }}>
+                    <button onClick={()=>toggleLock(key)} style={{ flex:1, fontSize:11, padding:"3px 4px", borderRadius:5, border:"1px solid "+(locked?"#ea580c":"#d1d5db"), background:locked?"#ffedd5":"#fff", color:locked?"#9a3412":"#374151", fontWeight:700, cursor:"pointer" }}>{locked?"📌固定中":"📌固定"}</button>
+                    <button onClick={()=>setEditCell(null)} style={{ fontSize:11, padding:"3px 8px", borderRadius:5, border:"1px solid #d1d5db", background:"#fff", cursor:"pointer" }}>閉</button>
+                  </div>
+                </div>}</td>; })}</tr>))}
+            {/* 救命日勤：土日祝のみ・手動・自動対象外・当直メンバー全員 */}
+            <tr key={RESCUE_SLOT.id}><td style={{ ...S.name, background:"#ecfeff" }}>{RESCUE_SLOT.label}</td>
+              {DAYS.map((day)=>{ const val=oncall[`rescue_day_${day.d}`]||""; const disabled=!day.isWeekend;
+                return <td key={day.d} style={{ ...S.cell, width:46, fontSize:10, background: disabled?"#f1f5f9":"#ecfeff", padding:0 }}>
+                  {disabled?"":<select value={val} onChange={(e)=>setOncallVal("rescue_day",day.d,e.target.value)} style={{ width:"100%", border:"none", background:"transparent", fontSize:9, cursor:"pointer" }}><option value="">—</option>{staff.map((x)=><option key={x.name} value={x.name}>{x.name}</option>)}</select>}
+                </td>; })}</tr>
+            {/* Oncall①：平日は1枠、土日祝は前半・後半の2行 */}
+            <tr key="oncall1a"><td style={{ ...S.name, background:"#fef9c3" }}>Oncall①{<span style={{ fontSize:10, color:"#92400e" }}> 前半</span>}</td>
+              {DAYS.map((day)=>{ const fld=day.isWeekend?"oncall1a":"oncall1"; const val=oncall[`${fld}_${day.d}`]||"";
                 return <td key={day.d} style={{ ...S.cell, width:46, fontSize:10, background:"#fffbeb", padding:0 }}>
-                  <select value={val} onChange={(e)=>setOncallVal("first",day.d,e.target.value)} style={{ width:"100%", border:"none", background:"transparent", fontSize:9, cursor:"pointer" }}>{ONCALL_DOCTORS.map((o)=><option key={o} value={o}>{o||"—"}</option>)}</select>
+                  <select value={val} onChange={(e)=>setOncallVal(fld,day.d,e.target.value)} style={{ width:"100%", border:"none", background:"transparent", fontSize:9, cursor:"pointer" }}><option value="">—</option>{(oncallLists.oncall1||[]).map((o)=><option key={o} value={o}>{o}</option>)}</select>
                 </td>; })}</tr>
-            <tr><td style={{ ...S.name, background:"#fef9c3" }}>呼出当番(後半)<br/><span style={{fontWeight:400,fontSize:9,color:"#92400e"}}>休日のみ</span></td>
-              {DAYS.map((day)=>{ const disabled=!day.isWeekend; const val=oncall[`second_${day.d}`]||"";
+            <tr key="oncall1b"><td style={{ ...S.name, background:"#fef9c3" }}>Oncall①{<span style={{ fontSize:10, color:"#92400e" }}> 後半</span>}</td>
+              {DAYS.map((day)=>{ const disabled=!day.isWeekend; const val=oncall[`oncall1b_${day.d}`]||"";
                 return <td key={day.d} style={{ ...S.cell, width:46, fontSize:10, background: disabled?"#f1f5f9":"#fffbeb", padding:0 }}>
-                  {!disabled && <select value={val} onChange={(e)=>setOncallVal("second",day.d,e.target.value)} style={{ width:"100%", border:"none", background:"transparent", fontSize:9, cursor:"pointer" }}>{ONCALL_DOCTORS.map((o)=><option key={o} value={o}>{o||"—"}</option>)}</select>}
+                  {disabled?"":<select value={val} onChange={(e)=>setOncallVal("oncall1b",day.d,e.target.value)} style={{ width:"100%", border:"none", background:"transparent", fontSize:9, cursor:"pointer" }}><option value="">—</option>{(oncallLists.oncall1||[]).map((o)=><option key={o} value={o}>{o}</option>)}</select>}
                 </td>; })}</tr>
+            {/* Oncall②③ */}
+            {[["oncall2","Oncall②"],["oncall3","Oncall③"]].map(([fld,lbl])=>(
+              <tr key={fld}><td style={{ ...S.name, background:"#fef9c3" }}>{lbl}</td>
+                {DAYS.map((day)=>{ const val=oncall[`${fld}_${day.d}`]||"";
+                  const opts = oncall23Options(day.d, fld);
+                  return <td key={day.d} style={{ ...S.cell, width:46, fontSize:10, background:"#fffbeb", padding:0 }}>
+                    <select value={val} onChange={(e)=>setOncallVal(fld,day.d,e.target.value)} style={{ width:"100%", border:"none", background:"transparent", fontSize:9, cursor:"pointer" }}><option value="">—</option>{opts.map((o)=><option key={o} value={o}>{o}</option>)}</select>
+                  </td>; })}</tr>
+            ))}
+            {/* Oncall人数（①②③の延べ人数。連名は2人と数える） */}
+            <tr key="oncall_count"><td style={{ ...S.name, background:"#fde68a", fontSize:11 }}>Oncall人数</td>
+              {DAYS.map((day)=>{ const c=oncallCountOnDay(day.d);
+                return <td key={day.d} style={{ ...S.cell, width:46, fontSize:11, fontWeight:800, background:"#fffbeb", color: c>0?"#92400e":"#d1d5db" }}>{c||""}</td>; })}</tr>
             </tbody>
-        </table><div style={{ fontSize:11, color:"#6b7280", marginTop:8 }}>※ セルをクリックで担当者変更。赤=希望に不適合。「この表を公開」でスタッフが閲覧できます。</div></div>
+        </table><div style={{ fontSize:11, color:"#6b7280", marginTop:8 }}>※ セルをクリックで担当者変更・📌で固定（固定マスは自動割り当てで動きません）。赤=希望に不適合。救命日勤・Oncallは手動。「この表を公開」でスタッフが閲覧できます。</div></div>
         <div style={S.card}><div style={{ fontSize:13, fontWeight:700, marginBottom:8 }}>枠別 担当回数（目標/実績）</div>
-          <table style={{ borderCollapse:"collapse", fontSize:12 }}><thead><tr><th style={{ textAlign:"left", padding:"3px 8px", borderBottom:"1px solid #e5e7eb" }}>氏名</th>{SLOTS.map((sl)=><th key={sl.id} style={{ padding:"3px 10px", borderBottom:"1px solid #e5e7eb" }}>{sl.label}</th>)}</tr></thead>
-          <tbody>{staff.map((s)=>(<tr key={s.name}><td style={{ padding:"3px 8px", fontWeight:600 }}>{s.name}</td>{SLOTS.map((sl)=>{ const tgt=quotaOf(s.name,sl.id), act=tally[s.name]?.[sl.id]??0, can=tgt>0; return <td key={sl.id} style={{ textAlign:"center", padding:"3px 10px", color: !can?"#d1d5db":act>tgt?"#b91c1c":act<tgt?"#6b7280":"#15803d", fontWeight:700 }}>{can?`${tgt}/${act}`:"—"}</td>; })}</tr>))}</tbody></table>
+          <table style={{ borderCollapse:"collapse", fontSize:12 }}><thead><tr><th style={{ textAlign:"left", padding:"3px 8px", borderBottom:"1px solid #e5e7eb" }}>氏名</th>{SLOTS.map((sl)=><th key={sl.id} style={{ padding:"3px 10px", borderBottom:"1px solid #e5e7eb" }}>{sl.label}</th>)}<th style={{ padding:"3px 10px", borderBottom:"1px solid #e5e7eb" }}>{RESCUE_SLOT.label}<br/><span style={{ fontWeight:400, color:"#6b7280", fontSize:10 }}>実績</span></th><th style={{ padding:"3px 10px", borderBottom:"1px solid #e5e7eb" }}>Oncall<br/><span style={{ fontWeight:400, color:"#6b7280", fontSize:10 }}>延べ実績</span></th></tr></thead>
+          <tbody>{staff.map((s)=>(<tr key={s.name}><td style={{ padding:"3px 8px", fontWeight:600 }}>{s.name}</td>{SLOTS.map((sl)=>{ const tgt=quotaOf(s.name,sl.id), act=tally[s.name]?.[sl.id]??0, can=tgt>0; return <td key={sl.id} style={{ textAlign:"center", padding:"3px 10px", color: !can?"#d1d5db":act>tgt?"#b91c1c":act<tgt?"#6b7280":"#15803d", fontWeight:700 }}>{can?`${tgt}/${act}`:"—"}</td>; })}
+            <td style={{ textAlign:"center", padding:"3px 10px", fontWeight:700, color:(tally[s.name]?.[RESCUE_SLOT.id]??0)>0?"#0e7490":"#d1d5db" }}>{tally[s.name]?.[RESCUE_SLOT.id]??0}</td>
+            <td style={{ textAlign:"center", padding:"3px 10px", fontWeight:700, color:(tally[s.name]?.oncall??0)>0?"#92400e":"#d1d5db" }}>{tally[s.name]?.oncall??0}</td></tr>))}</tbody></table>
         </div>
       </>)}
     </div>
