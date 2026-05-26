@@ -379,15 +379,16 @@ function AdminView({ year, month, DAYS, staff, adminUser, allPrefs, back, reload
   const moveOncallItem=async(listKey,idx,dir)=>{ const cur=[...(oncallLists[listKey]||[])]; const j=idx+dir; if(j<0||j>=cur.length)return; [cur[idx],cur[j]]=[cur[j],cur[idx]]; await saveOncallLists({...oncallLists,[listKey]:cur}); };
 
   const tally=useMemo(()=>{ const t={}; staff.forEach((st)=>{ t[st.name]=Object.fromEntries(SLOTS.map((s)=>[s.id,0])); t[st.name].oncall=0; t[st.name][RESCUE_SLOT.id]=0; });
-    // 通常枠（当直表）の実績
-    Object.entries(assign).forEach(([k,n])=>{ if(!n)return; const sl=k.slice(0,k.lastIndexOf("_")); if(t[n]&&t[n][sl]!==undefined)t[n][sl]++; });
-    // Oncall①②③・救命日勤の実績（oncall stateから集計）
-    Object.entries(oncall).forEach(([k,v])=>{ if(!v)return;
-      if(k.startsWith("rescue_day_")){ if(t[v]&&t[v][RESCUE_SLOT.id]!==undefined)t[v][RESCUE_SLOT.id]++; return; }
-      // Oncall①②③：連名は中の各名前に1回ずつ延べカウント
-      splitDoctor(v).forEach((nm)=>{ if(t[nm])t[nm].oncall++; });
-    });
-    return t; }, [assign, oncall, staff]);
+    // ※ その月（DAYS）の日付のみを集計する。月をまたいだ範囲外の日番号データは数えない。
+    for (const day of DAYS){ const d=day.d;
+      // 通常枠（当直表）の実績
+      SLOTS.forEach((sl)=>{ const n=assign[`${sl.id}_${d}`]; if(n&&t[n]&&t[n][sl.id]!==undefined)t[n][sl.id]++; });
+      // 救命日勤の実績
+      const r=oncall[`rescue_day_${d}`]; if(r&&t[r]&&t[r][RESCUE_SLOT.id]!==undefined)t[r][RESCUE_SLOT.id]++;
+      // Oncall①前半/後半・②・③：連名は中の各名前に1回ずつ延べカウント
+      ["oncall1a","oncall1b","oncall1","oncall2","oncall3"].forEach((f)=>{ splitDoctor(oncall[`${f}_${d}`]||"").forEach((nm)=>{ if(t[nm])t[nm].oncall++; }); });
+    }
+    return t; }, [assign, oncall, staff, DAYS]);
 
   // その日に勤務（ER日勤・ICU日勤・ICU当直・救命日勤）で出ているメンバーの集合。
   const workersOnDay=useCallback((day)=>{ const set=new Set();
@@ -513,50 +514,50 @@ function AdminView({ year, month, DAYS, staff, adminUser, allPrefs, back, reload
       {view==="table" && (<>
         {warnings.length>0 && <div style={{ background:"#fef2f2", border:"1px solid #fca5a5", borderRadius:10, padding:"10px 14px", marginBottom:12, fontSize:12, color:"#991b1b", maxHeight:110, overflowY:"auto" }}><b>⚠ 要確認 {warnings.length}件：</b> {warnings.slice(0,30).join(" / ")}{warnings.length>30?" …":""}</div>}
         <div style={S.card}><table style={{ borderCollapse:"collapse" }}>
-          <thead><tr><th style={{ ...S.th, position:"sticky", left:0, zIndex:2, textAlign:"left" }}>枠</th>{DAYS.map((day)=><th key={day.d} style={dayTh(day)}>{day.d}<br/><span style={{fontWeight:400}}>{day.wLabel}</span></th>)}</tr></thead>
-          <tbody>{SLOTS.map((slot)=>(<tr key={slot.id}><td style={{ ...S.name, background: slot.kind==="night"?"#eef2ff":"#fff" }}>{slot.label}</td>
+          <thead><tr><th style={{ ...S.th, fontSize:13, position:"sticky", left:0, zIndex:2, textAlign:"left" }}>枠</th>{DAYS.map((day)=><th key={day.d} style={{ ...dayTh(day), fontSize:13 }}>{day.d}<br/><span style={{fontWeight:400}}>{day.wLabel}</span></th>)}</tr></thead>
+          <tbody>{SLOTS.map((slot)=>(<tr key={slot.id}><td style={{ ...S.name, fontSize:14, background: slot.kind==="night"?"#eef2ff":"#fff" }}>{slot.label}</td>
             {DAYS.map((day)=>{ const key=`${slot.id}_${day.d}`, n=assign[key]; const bad=n&&!canWork(n,slot,day); const disabled=slot.holidayOnly&&!day.isWeekend; const editing=editCell===key; const locked=!!locks[key];
-              return <td key={day.d} style={{ ...S.cell, width:46, fontSize:11, background: disabled?"#f1f5f9":bad?"#fee2e2":locked?"#fff7ed":day.isWeekend?"#f0f9ff":"#fff", color: bad?"#b91c1c":"#111827", position:"relative", boxShadow: locked?"inset 0 0 0 2px #ea580c":"none" }} onClick={()=>!disabled&&setEditCell(editing?null:key)}>
-                {locked&&<span style={{ position:"absolute", top:0, left:1, fontSize:8, lineHeight:1 }}>📌</span>}{n}
-                {editing&&<div onClick={(e)=>e.stopPropagation()} style={{ position:"absolute", top:0, left:0, zIndex:6, background:"#fff", border:"1px solid #d1d5db", borderRadius:6, boxShadow:"0 4px 14px rgba(0,0,0,.18)", padding:4, width:120 }}>
-                  <select autoFocus value={n||""} onChange={(e)=>{ const v=e.target.value||null; setAssign((a)=>{ const na={...a,[key]:v}; validate(na); return na; }); }} style={{ width:"100%", fontSize:12, marginBottom:4 }}>
+              return <td key={day.d} style={{ ...S.cell, width:52, height:30, fontSize:14, background: disabled?"#f1f5f9":bad?"#fee2e2":locked?"#fff7ed":day.isWeekend?"#f0f9ff":"#fff", color: bad?"#b91c1c":"#111827", position:"relative", boxShadow: locked?"inset 0 0 0 2px #ea580c":"none" }} onClick={()=>!disabled&&setEditCell(editing?null:key)}>
+                {locked&&<span style={{ position:"absolute", top:0, left:1, fontSize:9, lineHeight:1 }}>📌</span>}{n}
+                {editing&&<div onClick={(e)=>e.stopPropagation()} style={{ position:"absolute", top:0, left:0, zIndex:6, background:"#fff", border:"1px solid #d1d5db", borderRadius:6, boxShadow:"0 4px 14px rgba(0,0,0,.18)", padding:5, width:140 }}>
+                  <select autoFocus value={n||""} onChange={(e)=>{ const v=e.target.value||null; setAssign((a)=>{ const na={...a,[key]:v}; validate(na); return na; }); }} style={{ width:"100%", fontSize:14, marginBottom:5, padding:"2px" }}>
                     <option value="">（空き）</option>{staff.filter((x)=>canSlot(x.name,slot)).map((x)=>{ const a=availFromColor(colorOf(x.name,day.d),day.isWeekend); const ok=slot.kind==="night"?a.night:a.day; return <option key={x.name} value={x.name}>{x.name}{ok?"":" ⚠"}</option>; })}
                   </select>
                   <div style={{ display:"flex", gap:4 }}>
-                    <button onClick={()=>toggleLock(key)} style={{ flex:1, fontSize:11, padding:"3px 4px", borderRadius:5, border:"1px solid "+(locked?"#ea580c":"#d1d5db"), background:locked?"#ffedd5":"#fff", color:locked?"#9a3412":"#374151", fontWeight:700, cursor:"pointer" }}>{locked?"📌固定中":"📌固定"}</button>
-                    <button onClick={()=>setEditCell(null)} style={{ fontSize:11, padding:"3px 8px", borderRadius:5, border:"1px solid #d1d5db", background:"#fff", cursor:"pointer" }}>閉</button>
+                    <button onClick={()=>toggleLock(key)} style={{ flex:1, fontSize:12, padding:"4px 4px", borderRadius:5, border:"1px solid "+(locked?"#ea580c":"#d1d5db"), background:locked?"#ffedd5":"#fff", color:locked?"#9a3412":"#374151", fontWeight:700, cursor:"pointer" }}>{locked?"📌固定中":"📌固定"}</button>
+                    <button onClick={()=>setEditCell(null)} style={{ fontSize:12, padding:"4px 10px", borderRadius:5, border:"1px solid #d1d5db", background:"#fff", cursor:"pointer" }}>閉</button>
                   </div>
                 </div>}</td>; })}</tr>))}
             {/* 救命日勤：土日祝のみ・手動・自動対象外・当直メンバー全員 */}
-            <tr key={RESCUE_SLOT.id}><td style={{ ...S.name, background:"#ecfeff" }}>{RESCUE_SLOT.label}</td>
+            <tr key={RESCUE_SLOT.id}><td style={{ ...S.name, fontSize:14, background:"#ecfeff" }}>{RESCUE_SLOT.label}</td>
               {DAYS.map((day)=>{ const val=oncall[`rescue_day_${day.d}`]||""; const disabled=!day.isWeekend;
-                return <td key={day.d} style={{ ...S.cell, width:46, fontSize:10, background: disabled?"#f1f5f9":"#ecfeff", padding:0 }}>
-                  {disabled?"":<select value={val} onChange={(e)=>setOncallVal("rescue_day",day.d,e.target.value)} style={{ width:"100%", border:"none", background:"transparent", fontSize:9, cursor:"pointer" }}><option value="">—</option>{staff.map((x)=><option key={x.name} value={x.name}>{x.name}</option>)}</select>}
+                return <td key={day.d} style={{ ...S.cell, width:52, height:30, fontSize:13, background: disabled?"#f1f5f9":"#ecfeff", padding:0 }}>
+                  {disabled?"":<select value={val} onChange={(e)=>setOncallVal("rescue_day",day.d,e.target.value)} style={{ width:"100%", border:"none", background:"transparent", fontSize:13, cursor:"pointer" }}><option value="">—</option>{staff.map((x)=><option key={x.name} value={x.name}>{x.name}</option>)}</select>}
                 </td>; })}</tr>
             {/* Oncall①：平日は1枠、土日祝は前半・後半の2行 */}
-            <tr key="oncall1a"><td style={{ ...S.name, background:"#fef9c3" }}>Oncall①{<span style={{ fontSize:10, color:"#92400e" }}> 前半</span>}</td>
+            <tr key="oncall1a"><td style={{ ...S.name, fontSize:14, background:"#fef9c3" }}>Oncall①{<span style={{ fontSize:12, color:"#92400e" }}> 前半</span>}</td>
               {DAYS.map((day)=>{ const fld=day.isWeekend?"oncall1a":"oncall1"; const val=oncall[`${fld}_${day.d}`]||"";
-                return <td key={day.d} style={{ ...S.cell, width:46, fontSize:10, background:"#fffbeb", padding:0 }}>
-                  <select value={val} onChange={(e)=>setOncallVal(fld,day.d,e.target.value)} style={{ width:"100%", border:"none", background:"transparent", fontSize:9, cursor:"pointer" }}><option value="">—</option>{(oncallLists.oncall1||[]).map((o)=><option key={o} value={o}>{o}</option>)}</select>
+                return <td key={day.d} style={{ ...S.cell, width:52, height:30, fontSize:13, background:"#fffbeb", padding:0 }}>
+                  <select value={val} onChange={(e)=>setOncallVal(fld,day.d,e.target.value)} style={{ width:"100%", border:"none", background:"transparent", fontSize:13, cursor:"pointer" }}><option value="">—</option>{(oncallLists.oncall1||[]).map((o)=><option key={o} value={o}>{o}</option>)}</select>
                 </td>; })}</tr>
-            <tr key="oncall1b"><td style={{ ...S.name, background:"#fef9c3" }}>Oncall①{<span style={{ fontSize:10, color:"#92400e" }}> 後半</span>}</td>
+            <tr key="oncall1b"><td style={{ ...S.name, fontSize:14, background:"#fef9c3" }}>Oncall①{<span style={{ fontSize:12, color:"#92400e" }}> 後半</span>}</td>
               {DAYS.map((day)=>{ const disabled=!day.isWeekend; const val=oncall[`oncall1b_${day.d}`]||"";
-                return <td key={day.d} style={{ ...S.cell, width:46, fontSize:10, background: disabled?"#f1f5f9":"#fffbeb", padding:0 }}>
-                  {disabled?"":<select value={val} onChange={(e)=>setOncallVal("oncall1b",day.d,e.target.value)} style={{ width:"100%", border:"none", background:"transparent", fontSize:9, cursor:"pointer" }}><option value="">—</option>{(oncallLists.oncall1||[]).map((o)=><option key={o} value={o}>{o}</option>)}</select>}
+                return <td key={day.d} style={{ ...S.cell, width:52, height:30, fontSize:13, background: disabled?"#f1f5f9":"#fffbeb", padding:0 }}>
+                  {disabled?"":<select value={val} onChange={(e)=>setOncallVal("oncall1b",day.d,e.target.value)} style={{ width:"100%", border:"none", background:"transparent", fontSize:13, cursor:"pointer" }}><option value="">—</option>{(oncallLists.oncall1||[]).map((o)=><option key={o} value={o}>{o}</option>)}</select>}
                 </td>; })}</tr>
             {/* Oncall②③ */}
             {[["oncall2","Oncall②"],["oncall3","Oncall③"]].map(([fld,lbl])=>(
-              <tr key={fld}><td style={{ ...S.name, background:"#fef9c3" }}>{lbl}</td>
+              <tr key={fld}><td style={{ ...S.name, fontSize:14, background:"#fef9c3" }}>{lbl}</td>
                 {DAYS.map((day)=>{ const val=oncall[`${fld}_${day.d}`]||"";
                   const opts = oncall23Options(day.d, fld);
-                  return <td key={day.d} style={{ ...S.cell, width:46, fontSize:10, background:"#fffbeb", padding:0 }}>
-                    <select value={val} onChange={(e)=>setOncallVal(fld,day.d,e.target.value)} style={{ width:"100%", border:"none", background:"transparent", fontSize:9, cursor:"pointer" }}><option value="">—</option>{opts.map((o)=><option key={o} value={o}>{o}</option>)}</select>
+                  return <td key={day.d} style={{ ...S.cell, width:52, height:30, fontSize:13, background:"#fffbeb", padding:0 }}>
+                    <select value={val} onChange={(e)=>setOncallVal(fld,day.d,e.target.value)} style={{ width:"100%", border:"none", background:"transparent", fontSize:13, cursor:"pointer" }}><option value="">—</option>{opts.map((o)=><option key={o} value={o}>{o}</option>)}</select>
                   </td>; })}</tr>
             ))}
             {/* Oncall人数（①②③の延べ人数。連名は2人と数える） */}
-            <tr key="oncall_count"><td style={{ ...S.name, background:"#fde68a", fontSize:11 }}>Oncall人数</td>
+            <tr key="oncall_count"><td style={{ ...S.name, background:"#fde68a", fontSize:13 }}>Oncall人数</td>
               {DAYS.map((day)=>{ const c=oncallCountOnDay(day.d);
-                return <td key={day.d} style={{ ...S.cell, width:46, fontSize:11, fontWeight:800, background:"#fffbeb", color: c>0?"#92400e":"#d1d5db" }}>{c||""}</td>; })}</tr>
+                return <td key={day.d} style={{ ...S.cell, width:52, height:30, fontSize:14, fontWeight:800, background:"#fffbeb", color: c>0?"#92400e":"#d1d5db" }}>{c||""}</td>; })}</tr>
             </tbody>
         </table><div style={{ fontSize:11, color:"#6b7280", marginTop:8 }}>※ セルをクリックで担当者変更・📌で固定（固定マスは自動割り当てで動きません）。赤=希望に不適合。救命日勤・Oncallは手動。「この表を公開」でスタッフが閲覧できます。</div></div>
         <div style={S.card}><div style={{ fontSize:13, fontWeight:700, marginBottom:8 }}>枠別 担当回数（目標/実績）</div>
